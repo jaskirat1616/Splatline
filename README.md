@@ -216,6 +216,28 @@ python scripts/converters/video_to_3d_high_quality.py video.mp4 mps 2
 python scripts/converters/video_to_3d_high_quality.py video.mp4 mps 5
 ```
 
+**Video to 3D + human pose (YOLO):**
+
+Converts each frame with ML-SHARP, runs multi-person pose estimation (YOLOv8x-pose), and opens a Rerun layout with three panels: 3D Gaussian scene, 3D skeletons (depth from the splat cloud), and the video with pose overlay.
+
+```bash
+pip install ultralytics
+python scripts/converters/video_to_3d_with_pose.py your_video.mp4 --size 4.0
+```
+
+Use existing frames and PLYs without re-running SHARP:
+
+```bash
+python scripts/converters/video_to_3d_with_pose.py \
+  --gaussians-dir output_your_video/gaussians \
+  --frames-dir output_your_video/frames \
+  --size 4.0
+```
+
+- `--device` / `--skip` apply when converting from a video (same as `video_to_3d_high_quality.py`).
+- `--size` scales joint and bone thickness in 3D.
+- YOLO weights download automatically on first run; use the same Python environment for `pip install ultralytics` as for `python3`.
+
 **Standard Quality:**
 ```bash
 python scripts/converters/video_to_3d.py your_video.mp4
@@ -298,12 +320,15 @@ Apple-ml-sharp-rerun/
 ├── scripts/
 │   ├── converters/            # 2D video to 3D conversion
 │   │   ├── video_to_3d_high_quality.py  ⭐ Recommended
+│   │   ├── video_to_3d_with_pose.py     # SHARP + YOLO pose + Rerun
 │   │   ├── video_to_3d.py
 │   │   └── video_to_3d_simple.py
 │   ├── visualizers/           # 3D visualization viewers
 │   │   ├── video_complete_viewer.py     ⭐ Complete viewer with dual windows
 │   │   ├── video_navigation.py
-│   │   └── visualize_with_rerun.py
+│   │   ├── visualize_with_rerun.py
+│   │   ├── visualize_with_360_background.py
+│   │   └── visualize_with_custom_bg.py
 │   ├── navigation/            # Navigation & SLAM tools
 │   │   ├── build_navigation_map.py
 │   │   ├── extract_slam_data.py
