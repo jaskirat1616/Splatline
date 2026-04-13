@@ -24,33 +24,58 @@ wheels/
 venv/
 env/
 ENV/
+.venv/
 
-# IDE
+# IDE / editor
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Output directories
+# Output & generated data (keep repo small)
 output_*/
 output_test/
+runs/
+wandb/
 
-# Data files
+# Media (large; do not commit user videos or frame dumps)
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.m4v
 *.ply
 *.png
 *.jpg
 *.jpeg
-*.mp4
-*.mov
-*.avi
+*.gif
+*.exr
+*.hdr
 
-# Exception: Demo video and thumbnail for README
+# Exception: small demo assets for README
 !docs/assets/demo_video.mov
 !docs/assets/demo_thumbnail.jpg
+!docs/assets/demo_preview.gif
 
-# JSON outputs
+# JSON outputs (often large generated data)
 *.json
+
+# ML / pose weights (downloaded; hundreds of MB)
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.task
+*.engine
+*.trt
+
+# Download / tool caches (local machine)
+.cache/
+*.cache
+ultralytics/
+**/.ultralytics/
 
 # OS
 .DS_Store
@@ -63,8 +88,9 @@ Thumbs.db
 # Logs
 *.log
 
-# Temporary files
+# Temporary / backup
 *.tmp
 *.bak
-*.cache
 
+# Optional local notes (not part of the library)
+COOL_FEATURES.md
