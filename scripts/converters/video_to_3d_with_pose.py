@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Video to 3D with Pose Detection
-================================
+Video to 3D with Pose Detection (Splatline)
+===========================================
 Converts video frames to 3D Gaussian Splats (via Apple ML-SHARP) AND runs
 3D human pose detection on each frame.
 

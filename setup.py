@@ -1,5 +1,5 @@
 """
-Setup script for Apple ML-SHARP Rerun Visualization Tools.
+Setup script for Splatline — ML-SHARP + Rerun visualization tools.
 """
 
 from setuptools import setup, find_packages
@@ -10,12 +10,12 @@ readme_file = Path(__file__).parent / "README.md"
 long_description = readme_file.read_text() if readme_file.exists() else ""
 
 setup(
-    name="ml-sharp-rerun",
+    name="splatline",
     version="0.1.0",
-    description="Rerun-based visualization and navigation tools for 3D Gaussian Splatting",
+    description="Splatline: Rerun-based visualization and navigation for 3D Gaussian splats (ML-SHARP)",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    author="Apple ML-SHARP Team",
+    author="Splatline contributors",
     packages=find_packages(),
     python_requires=">=3.8",
     install_requires=[
@@ -29,9 +29,9 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "ml-sharp-visualize=scripts.visualizers.visualize_with_rerun:main",
-            "ml-sharp-complete-viewer=scripts.visualizers.video_complete_viewer:main",
-            "ml-sharp-nav-map=scripts.navigation.build_navigation_map:main",
+            "splatline-visualize=scripts.visualizers.visualize_with_rerun:main",
+            "splatline-complete-viewer=scripts.visualizers.video_complete_viewer:main",
+            "splatline-nav-map=scripts.navigation.build_navigation_map:main",
         ],
     },
     classifiers=[

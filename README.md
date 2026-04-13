@@ -1,6 +1,14 @@
-# Apple ML-SHARP Rerun
+# Splatline
 
-Convert 2D videos and photos into interactive 3D scenes using ML-SHARP and Rerun. Explore your videos in 3D space with depth maps, navigation tools, and creative effects.
+Convert 2D videos and photos into interactive 3D scenes using Apple’s ML-SHARP and Rerun. **Splatline** is a toolkit for exploring Gaussian splat videos in 3D, with depth maps, navigation tools, pose overlays, and creative effects.
+
+### GitHub repository name
+
+On GitHub, set the repository name to **`splatline`**: *Settings → General → Repository name*. After renaming, point your local clone at the new URL, for example:
+
+```bash
+git remote set-url origin https://github.com/<your-username>/splatline.git
+```
 
 ## Demo Video
 
@@ -26,7 +34,7 @@ Convert 2D videos and photos into interactive 3D scenes using ML-SHARP and Rerun
 1. **Open Terminal (Mac/Linux) or Command Prompt (Windows)**
 2. **Navigate to this folder** (where you downloaded this project)
    ```bash
-   cd /path/to/Apple-ml-sharp-rerun
+   cd /path/to/splatline
    ```
 3. **Install required software** (run these commands):
    ```bash
@@ -316,7 +324,7 @@ python scripts/creative/create_camera_path.py -i scene.ply --path orbit
 ## 📁 Project Structure
 
 ```
-Apple-ml-sharp-rerun/
+splatline/
 ├── scripts/
 │   ├── converters/            # 2D video to 3D conversion
 │   │   ├── video_to_3d_high_quality.py  ⭐ Recommended
@@ -650,7 +658,7 @@ This project uses these open-source technologies:
 
 ## 📄 License
 
-This project is part of the Apple ML-SHARP ecosystem and visualization tools.
+**Splatline** builds on Apple’s ML-SHARP model and Rerun; it is an independent community toolkit, not an Apple product.
 
 **Third-party licenses:**
 - **Rerun**: Apache-2.0 License
@@ -659,4 +667,4 @@ This project is part of the Apple ML-SHARP ecosystem and visualization tools.
 
 ---
 
-**Made with ❤️ using [Rerun](https://github.com/rerun-io/rerun) and [Apple ML-SHARP](https://github.com/apple/ml-sharp)**
+**Splatline** — made with [Rerun](https://github.com/rerun-io/rerun) and [Apple ML-SHARP](https://github.com/apple/ml-sharp)

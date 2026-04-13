@@ -1,5 +1,7 @@
 # From Flat to Fantastic: Bringing 2D Videos Into 3D Reality
 
+**Project: Splatline** — a toolkit for ML-SHARP + Rerun workflows.
+
 ## The Challenge
 
 Most of us have thousands of videos sitting on our phones—family gatherings, travel adventures, that perfect sunset. But they're stuck in two dimensions. You can't walk around them, can't see what's behind that tree, can't explore the space the way you experienced it in real life.
@@ -114,5 +116,5 @@ That's the real win—not the technical achievement, but making it accessible. B
 
 ---
 
-*This project combines Apple's ML-SHARP model with Rerun's visualization framework to create a complete 2D-to-3D conversion and exploration system. All code is available on GitHub, with full documentation and examples.*
+*Splatline combines Apple's ML-SHARP model with Rerun's visualization framework to create a complete 2D-to-3D conversion and exploration system. All code is available on GitHub, with full documentation and examples.*
 
