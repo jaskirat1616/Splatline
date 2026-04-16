@@ -2,208 +2,131 @@
 """
 High-Quality Video to 3D Converter - Process ALL frames without skipping.
 
-This script extracts every frame from a video and converts each to a 3D Gaussian Splat PLY file.
+This script extracts every frame from a video and converts each to a 3D
+Gaussian Splat PLY file.  It batches SHARP inference for higher GPU
+utilisation and overlaps CPU-side PLY saving with the next GPU batch.
 """
 
 import sys
+import time
 import logging
+import argparse
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, Future
+from typing import List, Tuple, Optional
+
 import cv2
 import torch
 import numpy as np
 import torch.nn.functional as F
 
 
+# ---------------------------------------------------------------------------
+# Frame extraction
+# ---------------------------------------------------------------------------
+
 def extract_all_frames(video_path: Path, output_dir: Path, frame_skip: int = 1) -> int:
     """
     Extract frames from video with optional skipping.
-    
+
     Args:
         video_path: Path to the video file
         output_dir: Directory to save frames
         frame_skip: Extract every Nth frame (1 = all frames, 2 = every other, etc.)
-    
+
     Returns:
         Number of frames extracted
     """
     frames_dir = output_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    
-    print(f"\n📹 Extracting frames from: {video_path.name}")
-    print(f"   Output directory: {frames_dir}")
-    
+
+    print(f"\n>>> Extracting frames from: {video_path.name}")
+    print(f"    Output directory: {frames_dir}")
+
     # Open video
     cap = cv2.VideoCapture(str(video_path))
-    
+
     if not cap.isOpened():
         raise ValueError(f"Could not open video: {video_path}")
-    
+
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     expected_output_frames = (total_frames + frame_skip - 1) // frame_skip
-    
-    print(f"   Video info: {total_frames} frames @ {fps:.2f} FPS")
-    
+
+    print(f"    Video info: {total_frames} frames @ {fps:.2f} FPS")
+
     if frame_skip > 1:
-        print(f"   Frame skip: Every {frame_skip} frame(s)")
-        print(f"   Will extract: ~{expected_output_frames} frames\n")
+        print(f"    Frame skip: Every {frame_skip} frame(s)")
+        print(f"    Will extract: ~{expected_output_frames} frames\n")
     else:
-        print(f"   Extracting all {total_frames} frames\n")
-    
-    print(f"⏳ Extracting frames...")
-    
+        print(f"    Extracting all {total_frames} frames\n")
+
+    print(f"    Extracting frames...")
+
     video_frame_count = 0
     saved_frame_count = 0
-    
+
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        
+
         # Only save every Nth frame
         if video_frame_count % frame_skip == 0:
             # Save frame as PNG (lossless)
             frame_path = frames_dir / f"frame_{saved_frame_count:06d}.png"
             cv2.imwrite(str(frame_path), frame)
             saved_frame_count += 1
-            
+
             if saved_frame_count % 10 == 0 or saved_frame_count == 1:
-                print(f"   Extracted: {saved_frame_count} frames (video frame {video_frame_count}/{total_frames})", end="\r")
-        
+                print(f"    Extracted: {saved_frame_count} frames "
+                      f"(video frame {video_frame_count}/{total_frames})",
+                      end="\r")
+
         video_frame_count += 1
-    
+
     cap.release()
-    print(f"\n✓ Extracted {saved_frame_count} frames from {video_frame_count} video frames")
-    
+    print(f"\n    Extracted {saved_frame_count} frames from "
+          f"{video_frame_count} video frames")
+
     return saved_frame_count
 
 
-def convert_frames_to_3d(frames_dir: Path, output_dir: Path, device: str = "default"):
-    """
-    Convert all frames to 3D Gaussian Splats using SHARP Python API.
-    
-    Args:
-        frames_dir: Directory containing frame images
-        output_dir: Directory to save PLY files
-        device: Device to use ('default', 'cuda', 'mps', 'cpu')
-    """
-    from sharp.models import PredictorParams, create_predictor
-    from sharp.utils import io
-    from sharp.utils.gaussians import save_ply, unproject_gaussians
-    
-    gaussians_dir = output_dir / "gaussians"
-    gaussians_dir.mkdir(parents=True, exist_ok=True)
-    
-    print(f"\n🎨 Converting frames to 3D Gaussian Splats...")
-    print(f"   Input: {frames_dir}")
-    print(f"   Output: {gaussians_dir}")
-    print(f"   Device: {device}")
-    
-    # Auto-detect device
-    if device == "default":
-        if torch.cuda.is_available():
-            device = "cuda"
-            print(f"   ✓ Using CUDA (GPU)")
-        elif torch.mps.is_available():
-            device = "mps"
-            print(f"   ✓ Using MPS (Apple Silicon GPU)")
-        else:
-            device = "cpu"
-            print(f"   ⚠️  Using CPU (will be slower)")
-    
-    device_obj = torch.device(device)
-    
-    # Load model
-    print(f"\n⏳ Loading SHARP model...")
-    DEFAULT_MODEL_URL = "https://ml-site.cdn-apple.com/models/sharp/sharp_2572gikvuh.pt"
-    
-    try:
-        print(f"   Downloading model from: {DEFAULT_MODEL_URL}")
-        state_dict = torch.hub.load_state_dict_from_url(DEFAULT_MODEL_URL, progress=True)
-        
-        gaussian_predictor = create_predictor(PredictorParams())
-        gaussian_predictor.load_state_dict(state_dict)
-        gaussian_predictor.eval()
-        gaussian_predictor.to(device_obj)
-        print(f"   ✓ Model loaded successfully")
-    except Exception as e:
-        print(f"\n✗ Error loading model: {e}")
-        return False
-    
-    # Get all image files
-    extensions = io.get_supported_image_extensions()
-    image_paths = []
-    for ext in extensions:
-        image_paths.extend(list(frames_dir.glob(f"*{ext}")))
-    
-    image_paths = sorted(image_paths)
-    
-    if len(image_paths) == 0:
-        print(f"✗ No images found in {frames_dir}")
-        return False
-    
-    print(f"\n⏳ Processing {len(image_paths)} frames...")
-    
-    # Process each frame
-    for idx, image_path in enumerate(image_paths):
-        try:
-            print(f"   [{idx+1}/{len(image_paths)}] Processing {image_path.name}...", end=" ")
-            
-            # Load image
-            image, _, f_px = io.load_rgb(image_path)
-            height, width = image.shape[:2]
-            
-            # Predict gaussians
-            gaussians = predict_image_direct(gaussian_predictor, image, f_px, device_obj)
-            
-            # Save PLY
-            output_ply = gaussians_dir / f"{image_path.stem}.ply"
-            save_ply(gaussians, f_px, (height, width), output_ply)
-            
-            print(f"✓")
-            
-        except Exception as e:
-            print(f"✗ Error: {e}")
-            continue
-    
-    print(f"\n✓ Successfully converted all frames to 3D!")
-    return True
+# ---------------------------------------------------------------------------
+# Batched SHARP inference helpers
+# ---------------------------------------------------------------------------
+
+INTERNAL_SHAPE = (1536, 1536)
 
 
-@torch.no_grad()
-def predict_image_direct(predictor, image: np.ndarray, f_px: float, device: torch.device):
+def _preprocess_image(image: np.ndarray, f_px: float, device: torch.device):
     """
-    Predict Gaussians from an image using SHARP.
-    
-    Args:
-        predictor: SHARP predictor model
-        image: Input image as numpy array
-        f_px: Focal length in pixels
-        device: Torch device
-    
+    Preprocess a single image for SHARP inference.
+
     Returns:
-        Gaussians3D object
+        (image_resized, disparity_factor, height, width)
+        where image_resized is [1, 3, 1536, 1536] and disparity_factor is a
+        scalar tensor.
     """
-    from sharp.utils.gaussians import unproject_gaussians
-    
-    internal_shape = (1536, 1536)
-    
-    # Preprocess
-    image_pt = torch.from_numpy(image.copy()).float().to(device).permute(2, 0, 1) / 255.0
+    image_pt = (
+        torch.from_numpy(image.copy()).float().to(device).permute(2, 0, 1)
+        / 255.0
+    )
     _, height, width = image_pt.shape
     disparity_factor = torch.tensor([f_px / width]).float().to(device)
-    
-    image_resized_pt = F.interpolate(
+
+    image_resized = F.interpolate(
         image_pt[None],
-        size=(internal_shape[1], internal_shape[0]),
+        size=(INTERNAL_SHAPE[1], INTERNAL_SHAPE[0]),
         mode="bilinear",
         align_corners=True,
     )
-    
-    # Predict Gaussians in NDC space
-    gaussians_ndc = predictor(image_resized_pt, disparity_factor)
-    
-    # Postprocess
+
+    return image_resized, disparity_factor, height, width
+
+
+def _build_intrinsics(f_px: float, height: int, width: int, device: torch.device):
+    """Build and return (K, K_resized) intrinsic matrices for a single frame."""
     intrinsics = (
         torch.tensor(
             [
@@ -217,113 +140,489 @@ def predict_image_direct(predictor, image: np.ndarray, f_px: float, device: torc
         .to(device)
     )
     intrinsics_resized = intrinsics.clone()
-    intrinsics_resized[0] *= internal_shape[0] / width
-    intrinsics_resized[1] *= internal_shape[1] / height
-    
-    # Convert Gaussians to metric space
-    gaussians = unproject_gaussians(
-        gaussians_ndc, torch.eye(4).to(device), intrinsics_resized, internal_shape
+    intrinsics_resized[0] *= INTERNAL_SHAPE[0] / width
+    intrinsics_resized[1] *= INTERNAL_SHAPE[1] / height
+    return intrinsics, intrinsics_resized
+
+
+@torch.no_grad()
+def _batched_predict(predictor, images_resized: torch.Tensor,
+                     disparity_factors: torch.Tensor):
+    """
+    Run the SHARP predictor on a batch of images.
+
+    Args:
+        predictor: SHARP predictor model
+        images_resized: [B, 3, 1536, 1536] tensor
+        disparity_factors: [B] tensor of per-image disparity factors
+
+    Returns:
+        gaussians_ndc (batched output from the predictor)
+    """
+    return predictor(images_resized, disparity_factors)
+
+
+def _unproject_single(gaussians_ndc_single, intrinsics_resized, device):
+    """Unproject a single frame's NDC gaussians to metric space."""
+    from sharp.utils.gaussians import unproject_gaussians
+
+    return unproject_gaussians(
+        gaussians_ndc_single,
+        torch.eye(4).to(device),
+        intrinsics_resized,
+        INTERNAL_SHAPE,
     )
-    
+
+
+# ---------------------------------------------------------------------------
+# PLY save function (runs in worker thread)
+# ---------------------------------------------------------------------------
+
+def _save_ply_in_thread(save_ply_fn, gaussians_data, f_px, hw_tuple,
+                        output_path):
+    """
+    Save a single PLY file.  Designed to run in a ThreadPoolExecutor.
+
+    Using threads (not processes) avoids pickling issues with Gaussians3D
+    objects and the sharp package.  PLY saving is I/O-bound (numpy
+    serialisation + disk write) and releases the GIL during the heavy
+    parts, so threads provide effective parallelism here.
+    """
+    save_ply_fn(gaussians_data, f_px, hw_tuple, output_path)
+
+
+# ---------------------------------------------------------------------------
+# Core conversion function
+# ---------------------------------------------------------------------------
+
+def convert_frames_to_3d(
+    frames_dir: Path,
+    output_dir: Path,
+    device: str = "default",
+    batch_size: int = 4,
+):
+    """
+    Convert all frames to 3D Gaussian Splats using SHARP Python API.
+
+    Batches GPU inference and overlaps CPU-side PLY writing with the next
+    GPU batch for higher throughput.
+
+    Args:
+        frames_dir: Directory containing frame images
+        output_dir: Directory to save PLY files
+        device: Device to use ('default', 'cuda', 'mps', 'cpu')
+        batch_size: Number of images per GPU batch (auto-falls back to 1 on OOM)
+    """
+    from sharp.models import PredictorParams, create_predictor
+    from sharp.utils import io
+    from sharp.utils.gaussians import save_ply
+
+    gaussians_dir = output_dir / "gaussians"
+    gaussians_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n--- Converting frames to 3D Gaussian Splats ---")
+    print(f"    Input: {frames_dir}")
+    print(f"    Output: {gaussians_dir}")
+    print(f"    Device: {device}")
+    print(f"    Batch size: {batch_size}")
+
+    # Auto-detect device
+    if device == "default":
+        if torch.cuda.is_available():
+            device = "cuda"
+            print(f"    Using CUDA (GPU)")
+        elif torch.mps.is_available():
+            device = "mps"
+            print(f"    Using MPS (Apple Silicon GPU)")
+        else:
+            device = "cpu"
+            print(f"    Using CPU (will be slower)")
+
+    device_obj = torch.device(device)
+
+    # Load model
+    print(f"\n    Loading SHARP model...")
+    DEFAULT_MODEL_URL = (
+        "https://ml-site.cdn-apple.com/models/sharp/sharp_2572gikvuh.pt"
+    )
+
+    try:
+        print(f"    Downloading model from: {DEFAULT_MODEL_URL}")
+        state_dict = torch.hub.load_state_dict_from_url(
+            DEFAULT_MODEL_URL, progress=True
+        )
+
+        gaussian_predictor = create_predictor(PredictorParams())
+        gaussian_predictor.load_state_dict(state_dict)
+        gaussian_predictor.eval()
+        gaussian_predictor.to(device_obj)
+        print(f"    Model loaded successfully")
+    except Exception as e:
+        print(f"\n    Error loading model: {e}")
+        return False
+
+    # Gather image paths
+    extensions = io.get_supported_image_extensions()
+    image_paths: List[Path] = []
+    for ext in extensions:
+        image_paths.extend(list(frames_dir.glob(f"*{ext}")))
+    image_paths = sorted(image_paths)
+
+    if len(image_paths) == 0:
+        print(f"    No images found in {frames_dir}")
+        return False
+
+    total_frames = len(image_paths)
+    print(f"\n    Processing {total_frames} frames "
+          f"(batch_size={batch_size})...")
+
+    # ------------------------------------------------------------------
+    # Main loop: batched predict + overlapped PLY save
+    # ------------------------------------------------------------------
+    t_start = time.perf_counter()
+    processed = 0
+    save_futures: List[Future] = []
+
+    # We use a ThreadPoolExecutor to overlap PLY saves with GPU work.
+    # Threads (not processes) avoid pickling issues with Gaussians3D
+    # objects.  PLY saving is I/O-bound and releases the GIL during
+    # numpy serialisation and disk writes, so threads provide effective
+    # parallelism.  max_workers=2 keeps I/O busy without contention.
+    with ThreadPoolExecutor(max_workers=2) as save_pool:
+        batch_start = 0
+        while batch_start < total_frames:
+            batch_end = min(batch_start + batch_size, total_frames)
+            batch_paths = image_paths[batch_start:batch_end]
+            current_batch_size = len(batch_paths)
+
+            # -- Stage 1: Load + preprocess all images in this batch -------
+            images_resized_list = []
+            disp_factors_list = []
+            frame_meta = []  # (f_px, height, width, output_path) per image
+
+            for img_path in batch_paths:
+                try:
+                    image, _, f_px = io.load_rgb(img_path)
+                    height, width = image.shape[:2]
+
+                    img_resized, disp_factor, h, w = _preprocess_image(
+                        image, f_px, device_obj
+                    )
+                    images_resized_list.append(img_resized)
+                    disp_factors_list.append(disp_factor)
+                    frame_meta.append((
+                        f_px, h, w,
+                        gaussians_dir / f"{img_path.stem}.ply",
+                    ))
+                except Exception as e:
+                    print(f"\n    [{batch_start + len(frame_meta) + 1}/"
+                          f"{total_frames}] Error loading {img_path.name}: {e}")
+                    continue
+
+            if not images_resized_list:
+                batch_start = batch_end
+                continue
+
+            # -- Stage 2: Batched GPU inference ----------------------------
+            images_batch = torch.cat(images_resized_list, dim=0)
+            disp_batch = torch.cat(disp_factors_list, dim=0)
+
+            try:
+                gaussians_ndc_batch = _batched_predict(
+                    gaussian_predictor, images_batch, disp_batch
+                )
+            except (RuntimeError,) as oom_err:
+                # Auto-fallback: retry one-by-one on OOM / MPS error
+                if current_batch_size > 1:
+                    oom_msg = str(oom_err)
+                    if ("out of memory" in oom_msg.lower()
+                            or "mps" in oom_msg.lower()):
+                        print(f"\n    OOM with batch_size="
+                              f"{current_batch_size}"
+                              f" -- falling back to batch_size=1")
+                        batch_size = 1
+                        # Retry this batch one-by-one
+                        for i, (img_r, df) in enumerate(
+                            zip(images_resized_list, disp_factors_list)
+                        ):
+                            f_px_i, h_i, w_i, out_path_i = frame_meta[i]
+                            try:
+                                g_ndc = _batched_predict(
+                                    gaussian_predictor, img_r, df
+                                )
+                                _, K_resized_i = _build_intrinsics(
+                                    f_px_i, h_i, w_i, device_obj
+                                )
+                                gaussians_i = _unproject_single(
+                                    g_ndc, K_resized_i, device_obj
+                                )
+                                gaussians_cpu = gaussians_i.cpu()
+                                fut = save_pool.submit(
+                                    _save_ply_in_thread,
+                                    save_ply,
+                                    gaussians_cpu,
+                                    f_px_i,
+                                    (h_i, w_i),
+                                    out_path_i,
+                                )
+                                save_futures.append(fut)
+                                processed += 1
+                                print(f"    [{processed}/{total_frames}] "
+                                      f"{out_path_i.name} (b=1)",
+                                      end="\r")
+                            except Exception as inner_e:
+                                print(f"\n    Error on fallback for "
+                                      f"{out_path_i.name}: {inner_e}")
+                        batch_start = batch_end
+                        continue
+                raise
+
+            # -- Stage 3: Per-frame unproject + async PLY save -------------
+            for i in range(len(frame_meta)):
+                f_px_i, h_i, w_i, out_path_i = frame_meta[i]
+
+                _, K_resized_i = _build_intrinsics(
+                    f_px_i, h_i, w_i, device_obj
+                )
+
+                # Index into the batched NDC gaussians for this frame.
+                # SHARP predictor may return a batched Gaussians3D object
+                # or a structure that supports indexing.  We try [i] first;
+                # if that fails we treat the whole output as single-frame
+                # (only valid when batch_size == 1).
+                try:
+                    g_ndc_i = gaussians_ndc_batch[i]
+                except (IndexError, TypeError, KeyError):
+                    # Non-indexable -- only safe when batch == 1
+                    g_ndc_i = gaussians_ndc_batch
+
+                gaussians_i = _unproject_single(
+                    g_ndc_i, K_resized_i, device_obj
+                )
+
+                # Move tensors to CPU before submitting to the save thread.
+                # This releases GPU memory sooner so the next batch can
+                # start without waiting.
+                gaussians_cpu = gaussians_i.cpu()
+
+                fut = save_pool.submit(
+                    _save_ply_in_thread,
+                    save_ply,
+                    gaussians_cpu,
+                    f_px_i,
+                    (h_i, w_i),
+                    out_path_i,
+                )
+                save_futures.append(fut)
+                processed += 1
+                print(f"    [{processed}/{total_frames}] "
+                      f"{out_path_i.name}", end="\r")
+
+            batch_start = batch_end
+
+        # -- Wait for all outstanding PLY saves to finish ------------------
+        errors = 0
+        for fut in save_futures:
+            try:
+                fut.result()
+            except Exception as e:
+                errors += 1
+                print(f"\n    PLY save error: {e}")
+
+    t_elapsed = time.perf_counter() - t_start
+    fps = processed / t_elapsed if t_elapsed > 0 else float("inf")
+
+    print(f"\n\n    Done: {processed} frames in {t_elapsed:.1f}s "
+          f"({fps:.2f} frames/sec)")
+    if errors:
+        print(f"    {errors} PLY save error(s) occurred.")
+    print(f"    Successfully converted frames to 3D!")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Legacy single-frame prediction (kept for reference / direct usage)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def predict_image_direct(
+    predictor, image: np.ndarray, f_px: float, device: torch.device
+):
+    """
+    Predict Gaussians from a single image using SHARP.
+
+    This is the original per-frame path kept for backward compatibility.
+    The batched path in ``convert_frames_to_3d`` is preferred.
+
+    Args:
+        predictor: SHARP predictor model
+        image: Input image as numpy array [H, W, 3]
+        f_px: Focal length in pixels
+        device: Torch device
+
+    Returns:
+        Gaussians3D object
+    """
+    from sharp.utils.gaussians import unproject_gaussians
+
+    image_resized, disp_factor, height, width = _preprocess_image(
+        image, f_px, device
+    )
+    gaussians_ndc = predictor(image_resized, disp_factor)
+
+    _, K_resized = _build_intrinsics(f_px, height, width, device)
+
+    gaussians = unproject_gaussians(
+        gaussians_ndc,
+        torch.eye(4).to(device),
+        K_resized,
+        INTERNAL_SHAPE,
+    )
+
     return gaussians
 
 
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="video_to_3d_high_quality.py",
+        description=(
+            "Convert video frames to high-quality 3D Gaussian Splats.\n\n"
+            "Supports batched GPU inference and overlapped PLY writing\n"
+            "for significantly higher throughput."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # Positional arguments (preserve backward compatibility with the old
+    # ``script video_file [device] [skip]`` interface).
+    p.add_argument(
+        "video_file",
+        metavar="VIDEO",
+        help="Path to your video file (mp4, mov, avi, etc.)",
+    )
+    p.add_argument(
+        "device",
+        nargs="?",
+        default="default",
+        help=(
+            "Compute device: 'cuda', 'mps', 'cpu', or 'default' "
+            "(auto-detect).  [default: default]"
+        ),
+    )
+    p.add_argument(
+        "skip",
+        nargs="?",
+        type=int,
+        default=1,
+        help="Extract every Nth frame (default: 1 = all frames).",
+    )
+
+    # New optional flag
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        metavar="N",
+        dest="batch_size",
+        help=(
+            "Number of images per GPU batch.  Higher = better GPU "
+            "utilisation but more VRAM.  Auto-falls back to 1 on OOM.  "
+            "[default: 4]"
+        ),
+    )
+
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
 def main():
     """Main entry point."""
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("HIGH-QUALITY VIDEO TO 3D CONVERTER")
     print("Convert video frames to 3D Gaussian Splats")
-    print("="*70)
-    
-    if len(sys.argv) < 2:
-        print("\nUsage: python video_to_3d_high_quality.py <video_file> [device] [skip]")
-        print("\nArguments:")
-        print("  video_file  : Path to your video file (mp4, mov, avi, etc.)")
-        print("  device      : Optional - 'cuda', 'mps', 'cpu', or 'default' (auto-detect)")
-        print("  skip        : Optional - Extract every Nth frame (default: 1 = all frames)")
-        print("\nExamples:")
-        print("  # Process ALL frames")
-        print("  python video_to_3d_high_quality.py myvideo.mp4")
-        print("")
-        print("  # Process every 2nd frame (half the frames, 2x faster)")
-        print("  python video_to_3d_high_quality.py myvideo.mp4 mps 2")
-        print("")
-        print("  # Process every 5th frame (20% of frames, 5x faster)")
-        print("  python video_to_3d_high_quality.py myvideo.mp4 mps 5")
-        print("")
-        print("  # Process every 10th frame (10% of frames, 10x faster)")
-        print("  python video_to_3d_high_quality.py myvideo.mp4 mps 10")
-        print("\nOutput:")
-        print("  Creates 'output_<videoname>/' with:")
-        print("    - frames/     : Extracted video frames (PNG)")
-        print("    - gaussians/  : 3D Gaussian Splat files (PLY)")
-        print("="*70 + "\n")
-        sys.exit(1)
-    
-    video_path = Path(sys.argv[1])
-    device = sys.argv[2] if len(sys.argv) > 2 else "default"
-    frame_skip = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-    
+    print("=" * 70)
+
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    video_path = Path(args.video_file)
+    device = args.device
+    frame_skip = args.skip
+    batch_size = args.batch_size
+
     if frame_skip < 1:
-        print("✗ Error: Frame skip must be >= 1")
+        print("Error: Frame skip must be >= 1")
         sys.exit(1)
-    
+
+    if batch_size < 1:
+        print("Error: --batch-size must be >= 1")
+        sys.exit(1)
+
     if not video_path.exists():
-        print(f"✗ Error: Video file not found: {video_path}")
+        print(f"Error: Video file not found: {video_path}")
         sys.exit(1)
-    
+
     # Create output directory
     output_dir = Path(f"output_{video_path.stem}")
     output_dir.mkdir(exist_ok=True, parents=True)
-    
-    print(f"\n📁 Input video: {video_path}")
-    print(f"📁 Output directory: {output_dir}")
-    print(f"📁 Device: {device}")
-    print(f"📁 Frame skip: Every {frame_skip} frame(s)")
-    
+
+    print(f"\n    Input video: {video_path}")
+    print(f"    Output directory: {output_dir}")
+    print(f"    Device: {device}")
+    print(f"    Frame skip: Every {frame_skip} frame(s)")
+    print(f"    Batch size: {batch_size}")
+
     # Step 1: Extract frames
     try:
         num_frames = extract_all_frames(video_path, output_dir, frame_skip)
         if num_frames == 0:
-            print("✗ Error: No frames extracted")
+            print("Error: No frames extracted")
             sys.exit(1)
     except Exception as e:
-        print(f"✗ Error extracting frames: {e}")
+        print(f"Error extracting frames: {e}")
         sys.exit(1)
-    
-    # Step 2: Convert frames to 3D
+
+    # Step 2: Convert frames to 3D (batched + overlapped)
     frames_dir = output_dir / "frames"
-    success = convert_frames_to_3d(frames_dir, output_dir, device)
-    
+    success = convert_frames_to_3d(
+        frames_dir, output_dir, device, batch_size=batch_size
+    )
+
     if not success:
-        print("\n✗ Conversion failed")
+        print("\n    Conversion failed")
         sys.exit(1)
-    
+
     # Summary
     gaussians_dir = output_dir / "gaussians"
     ply_files = list(gaussians_dir.glob("*.ply"))
-    
-    print("\n" + "="*70)
-    print("✓ CONVERSION COMPLETE!")
-    print("="*70)
-    print(f"\n📊 Summary:")
-    print(f"   Extracted frames: {num_frames}")
-    print(f"   PLY files created: {len(ply_files)}")
+
+    print("\n" + "=" * 70)
+    print("CONVERSION COMPLETE!")
+    print("=" * 70)
+    print(f"\n    Summary:")
+    print(f"    Extracted frames: {num_frames}")
+    print(f"    PLY files created: {len(ply_files)}")
     if frame_skip > 1:
-        print(f"   Frame skip: Every {frame_skip} frame(s)")
-    print(f"\n📁 Outputs:")
-    print(f"   Frames: {output_dir / 'frames'}")
-    print(f"   3D Splats: {output_dir / 'gaussians'}")
-    
-    print(f"\n🎬 Next steps - Visualize your 3D video:")
-    print(f"\n   Option 1 - Rerun viewer (recommended):")
-    print(f"   python visualize_with_rerun.py -i {gaussians_dir}/")
-    print(f"\n   Option 2 - Web viewer:")
-    print(f"   python start_3d_viewer.py {gaussians_dir}/")
-    
-    print("\n" + "="*70 + "\n")
+        print(f"    Frame skip: Every {frame_skip} frame(s)")
+    print(f"\n    Outputs:")
+    print(f"    Frames: {output_dir / 'frames'}")
+    print(f"    3D Splats: {output_dir / 'gaussians'}")
+
+    print(f"\n    Next steps - Visualize your 3D video:")
+    print(f"\n    Option 1 - Rerun viewer (recommended):")
+    print(f"    python visualize_with_rerun.py -i {gaussians_dir}/")
+    print(f"\n    Option 2 - Web viewer:")
+    print(f"    python start_3d_viewer.py {gaussians_dir}/")
+
+    print("\n" + "=" * 70 + "\n")
 
 
 if __name__ == "__main__":
     main()
-
