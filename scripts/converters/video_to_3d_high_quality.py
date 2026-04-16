@@ -96,17 +96,23 @@ def extract_all_frames(video_path: Path, output_dir: Path, frame_skip: int = 1) 
 # Batched SHARP inference helpers
 # ---------------------------------------------------------------------------
 
-INTERNAL_SHAPE = (1536, 1536)
+# Default SHARP internal resolution. The model was trained at 1536x1536;
+# smaller shapes run faster with modest quality loss (compute scales as H*W).
+# 1024x1024 is ~2.25x faster than 1536x1536 and usually visually acceptable.
+DEFAULT_INTERNAL_SHAPE = (1024, 1024)
 
 
-def _preprocess_image(image: np.ndarray, f_px: float, device: torch.device):
+def _preprocess_image(
+    image: np.ndarray,
+    f_px: float,
+    device: torch.device,
+    internal_shape=DEFAULT_INTERNAL_SHAPE,
+):
     """
     Preprocess a single image for SHARP inference.
 
     Returns:
         (image_resized, disparity_factor, height, width)
-        where image_resized is [1, 3, 1536, 1536] and disparity_factor is a
-        scalar tensor.
     """
     image_pt = (
         torch.from_numpy(image.copy()).float().to(device).permute(2, 0, 1)
@@ -117,7 +123,7 @@ def _preprocess_image(image: np.ndarray, f_px: float, device: torch.device):
 
     image_resized = F.interpolate(
         image_pt[None],
-        size=(INTERNAL_SHAPE[1], INTERNAL_SHAPE[0]),
+        size=(internal_shape[1], internal_shape[0]),
         mode="bilinear",
         align_corners=True,
     )
@@ -125,7 +131,13 @@ def _preprocess_image(image: np.ndarray, f_px: float, device: torch.device):
     return image_resized, disparity_factor, height, width
 
 
-def _build_intrinsics(f_px: float, height: int, width: int, device: torch.device):
+def _build_intrinsics(
+    f_px: float,
+    height: int,
+    width: int,
+    device: torch.device,
+    internal_shape=DEFAULT_INTERNAL_SHAPE,
+):
     """Build and return (K, K_resized) intrinsic matrices for a single frame."""
     intrinsics = (
         torch.tensor(
@@ -140,29 +152,43 @@ def _build_intrinsics(f_px: float, height: int, width: int, device: torch.device
         .to(device)
     )
     intrinsics_resized = intrinsics.clone()
-    intrinsics_resized[0] *= INTERNAL_SHAPE[0] / width
-    intrinsics_resized[1] *= INTERNAL_SHAPE[1] / height
+    intrinsics_resized[0] *= internal_shape[0] / width
+    intrinsics_resized[1] *= internal_shape[1] / height
     return intrinsics, intrinsics_resized
 
 
+def _autocast_ctx(device_type: str, use_fp16: bool):
+    """
+    Return a context manager enabling fp16 autocast on GPU devices.
+    Falls back to nullcontext on CPU or when disabled.
+    """
+    from contextlib import nullcontext
+    if use_fp16 and device_type in ("cuda", "mps"):
+        return torch.autocast(device_type=device_type, dtype=torch.float16)
+    return nullcontext()
+
+
 @torch.no_grad()
-def _batched_predict(predictor, images_resized: torch.Tensor,
-                     disparity_factors: torch.Tensor):
+def _batched_predict(
+    predictor,
+    images_resized: torch.Tensor,
+    disparity_factors: torch.Tensor,
+    use_fp16: bool = True,
+):
     """
-    Run the SHARP predictor on a batch of images.
-
-    Args:
-        predictor: SHARP predictor model
-        images_resized: [B, 3, 1536, 1536] tensor
-        disparity_factors: [B] tensor of per-image disparity factors
-
-    Returns:
-        gaussians_ndc (batched output from the predictor)
+    Run the SHARP predictor on a batch of images, optionally in fp16 autocast.
     """
-    return predictor(images_resized, disparity_factors)
+    device_type = images_resized.device.type
+    with _autocast_ctx(device_type, use_fp16):
+        return predictor(images_resized, disparity_factors)
 
 
-def _unproject_single(gaussians_ndc_single, intrinsics_resized, device):
+def _unproject_single(
+    gaussians_ndc_single,
+    intrinsics_resized,
+    device,
+    internal_shape=DEFAULT_INTERNAL_SHAPE,
+):
     """Unproject a single frame's NDC gaussians to metric space."""
     from sharp.utils.gaussians import unproject_gaussians
 
@@ -170,7 +196,7 @@ def _unproject_single(gaussians_ndc_single, intrinsics_resized, device):
         gaussians_ndc_single,
         torch.eye(4).to(device),
         intrinsics_resized,
-        INTERNAL_SHAPE,
+        internal_shape,
     )
 
 
@@ -200,6 +226,8 @@ def convert_frames_to_3d(
     output_dir: Path,
     device: str = "default",
     batch_size: int = 4,
+    internal_shape=DEFAULT_INTERNAL_SHAPE,
+    use_fp16: bool = True,
 ):
     """
     Convert all frames to 3D Gaussian Splats using SHARP Python API.
@@ -212,6 +240,10 @@ def convert_frames_to_3d(
         output_dir: Directory to save PLY files
         device: Device to use ('default', 'cuda', 'mps', 'cpu')
         batch_size: Number of images per GPU batch (auto-falls back to 1 on OOM)
+        internal_shape: SHARP internal resolution (square). Smaller = faster
+            at small quality cost. Default 1024; model native is 1536.
+        use_fp16: Run predictor under fp16 autocast on GPU devices. ~1.5-2x
+            speedup on MPS/CUDA with negligible quality loss.
     """
     from sharp.models import PredictorParams, create_predictor
     from sharp.utils import io
@@ -225,6 +257,8 @@ def convert_frames_to_3d(
     print(f"    Output: {gaussians_dir}")
     print(f"    Device: {device}")
     print(f"    Batch size: {batch_size}")
+    print(f"    Internal shape: {internal_shape[0]}x{internal_shape[1]}")
+    print(f"    Precision: {'fp16 (autocast)' if use_fp16 else 'fp32'}")
 
     # Auto-detect device
     if device == "default":
@@ -306,7 +340,7 @@ def convert_frames_to_3d(
                     height, width = image.shape[:2]
 
                     img_resized, disp_factor, h, w = _preprocess_image(
-                        image, f_px, device_obj
+                        image, f_px, device_obj, internal_shape
                     )
                     images_resized_list.append(img_resized)
                     disp_factors_list.append(disp_factor)
@@ -329,7 +363,7 @@ def convert_frames_to_3d(
 
             try:
                 gaussians_ndc_batch = _batched_predict(
-                    gaussian_predictor, images_batch, disp_batch
+                    gaussian_predictor, images_batch, disp_batch, use_fp16
                 )
             except (RuntimeError,) as oom_err:
                 # Auto-fallback: retry one-by-one on OOM / MPS error
@@ -348,15 +382,15 @@ def convert_frames_to_3d(
                             f_px_i, h_i, w_i, out_path_i = frame_meta[i]
                             try:
                                 g_ndc = _batched_predict(
-                                    gaussian_predictor, img_r, df
+                                    gaussian_predictor, img_r, df, use_fp16
                                 )
                                 _, K_resized_i = _build_intrinsics(
-                                    f_px_i, h_i, w_i, device_obj
+                                    f_px_i, h_i, w_i, device_obj, internal_shape
                                 )
                                 gaussians_i = _unproject_single(
-                                    g_ndc, K_resized_i, device_obj
+                                    g_ndc, K_resized_i, device_obj, internal_shape
                                 )
-                                gaussians_cpu = gaussians_i.cpu()
+                                gaussians_cpu = gaussians_i.to(torch.device("cpu"))
                                 fut = save_pool.submit(
                                     _save_ply_in_thread,
                                     save_ply,
@@ -382,28 +416,30 @@ def convert_frames_to_3d(
                 f_px_i, h_i, w_i, out_path_i = frame_meta[i]
 
                 _, K_resized_i = _build_intrinsics(
-                    f_px_i, h_i, w_i, device_obj
+                    f_px_i, h_i, w_i, device_obj, internal_shape
                 )
 
-                # Index into the batched NDC gaussians for this frame.
-                # SHARP predictor may return a batched Gaussians3D object
-                # or a structure that supports indexing.  We try [i] first;
-                # if that fails we treat the whole output as single-frame
-                # (only valid when batch_size == 1).
-                try:
-                    g_ndc_i = gaussians_ndc_batch[i]
-                except (IndexError, TypeError, KeyError):
-                    # Non-indexable -- only safe when batch == 1
-                    g_ndc_i = gaussians_ndc_batch
+                # Gaussians3D is a NamedTuple: subscripting returns a FIELD,
+                # not a batch slice. Reconstruct a per-frame Gaussians3D by
+                # slicing each tensor along dim 0 (the batch dim). Using
+                # i:i+1 preserves the [1, N, ...] shape the unproject path
+                # expects.
+                g_ndc_i = type(gaussians_ndc_batch)(
+                    mean_vectors=gaussians_ndc_batch.mean_vectors[i:i + 1],
+                    singular_values=gaussians_ndc_batch.singular_values[i:i + 1],
+                    quaternions=gaussians_ndc_batch.quaternions[i:i + 1],
+                    colors=gaussians_ndc_batch.colors[i:i + 1],
+                    opacities=gaussians_ndc_batch.opacities[i:i + 1],
+                )
 
                 gaussians_i = _unproject_single(
-                    g_ndc_i, K_resized_i, device_obj
+                    g_ndc_i, K_resized_i, device_obj, internal_shape
                 )
 
                 # Move tensors to CPU before submitting to the save thread.
                 # This releases GPU memory sooner so the next batch can
                 # start without waiting.
-                gaussians_cpu = gaussians_i.cpu()
+                gaussians_cpu = gaussians_i.to(torch.device("cpu"))
 
                 fut = save_pool.submit(
                     _save_ply_in_thread,
@@ -466,17 +502,19 @@ def predict_image_direct(
     from sharp.utils.gaussians import unproject_gaussians
 
     image_resized, disp_factor, height, width = _preprocess_image(
-        image, f_px, device
+        image, f_px, device, DEFAULT_INTERNAL_SHAPE
     )
     gaussians_ndc = predictor(image_resized, disp_factor)
 
-    _, K_resized = _build_intrinsics(f_px, height, width, device)
+    _, K_resized = _build_intrinsics(
+        f_px, height, width, device, DEFAULT_INTERNAL_SHAPE
+    )
 
     gaussians = unproject_gaussians(
         gaussians_ndc,
         torch.eye(4).to(device),
         K_resized,
-        INTERNAL_SHAPE,
+        DEFAULT_INTERNAL_SHAPE,
     )
 
     return gaussians
@@ -534,6 +572,27 @@ def _build_parser() -> argparse.ArgumentParser:
             "[default: 4]"
         ),
     )
+    p.add_argument(
+        "--internal-shape",
+        type=int,
+        default=1024,
+        metavar="N",
+        dest="internal_shape",
+        help=(
+            "SHARP internal square resolution (e.g. 1024 or 1536). "
+            "Smaller is faster (~(1536/N)^2 speedup) with modest quality "
+            "loss.  The model was trained at 1536.  [default: 1024]"
+        ),
+    )
+    p.add_argument(
+        "--fp32",
+        action="store_true",
+        dest="fp32",
+        help=(
+            "Disable fp16 autocast during predictor forward pass. "
+            "Slower but slightly higher fidelity.  GPU devices only."
+        ),
+    )
 
     return p
 
@@ -556,6 +615,8 @@ def main():
     device = args.device
     frame_skip = args.skip
     batch_size = args.batch_size
+    internal_shape = (args.internal_shape, args.internal_shape)
+    use_fp16 = not args.fp32
 
     if frame_skip < 1:
         print("Error: Frame skip must be >= 1")
@@ -563,6 +624,10 @@ def main():
 
     if batch_size < 1:
         print("Error: --batch-size must be >= 1")
+        sys.exit(1)
+
+    if args.internal_shape < 64 or args.internal_shape > 4096:
+        print("Error: --internal-shape must be in [64, 4096]")
         sys.exit(1)
 
     if not video_path.exists():
@@ -592,7 +657,12 @@ def main():
     # Step 2: Convert frames to 3D (batched + overlapped)
     frames_dir = output_dir / "frames"
     success = convert_frames_to_3d(
-        frames_dir, output_dir, device, batch_size=batch_size
+        frames_dir,
+        output_dir,
+        device,
+        batch_size=batch_size,
+        internal_shape=internal_shape,
+        use_fp16=use_fp16,
     )
 
     if not success:
