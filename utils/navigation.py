@@ -24,31 +24,37 @@ def extract_ground_plane(positions, height_threshold=0.3, grid_size=5.0):
     # Create 2D grid (XZ plane)
     min_x, max_x = positions[:, 0].min(), positions[:, 0].max()
     min_z, max_z = positions[:, 2].min(), positions[:, 2].max()
-    
+
     # Grid resolution
     nx = int((max_x - min_x) / grid_size) + 1
     nz = int((max_z - min_z) / grid_size) + 1
-    
-    # Find lowest points in each grid cell (likely ground)
+
+    # Find lowest points in each grid cell (likely ground) — vectorized
     height_map = np.full((nx, nz), np.inf)
-    
-    for pos in positions:
-        i = int((pos[0] - min_x) / grid_size)
-        j = int((pos[2] - min_z) / grid_size)
-        if 0 <= i < nx and 0 <= j < nz:
-            height_map[i, j] = min(height_map[i, j], pos[1])
-    
-    # Create ground plane mesh
-    ground_points = []
-    for i in range(nx):
-        for j in range(nz):
-            if height_map[i, j] != np.inf:
-                x = min_x + i * grid_size
-                z = min_z + j * grid_size
-                y = height_map[i, j]
-                ground_points.append([x, y, z])
-    
-    ground_points = np.array(ground_points) if ground_points else np.empty((0, 3))
+
+    # Compute all grid indices at once (int() truncates toward zero = np.trunc then cast)
+    i_all = np.trunc((positions[:, 0] - min_x) / grid_size).astype(np.intp)
+    j_all = np.trunc((positions[:, 2] - min_z) / grid_size).astype(np.intp)
+
+    # Bounds mask
+    valid = (i_all >= 0) & (i_all < nx) & (j_all >= 0) & (j_all < nz)
+    i_v = i_all[valid]
+    j_v = j_all[valid]
+    y_v = positions[valid, 1]
+
+    # Scatter minimum height per cell
+    np.minimum.at(height_map, (i_v, j_v), y_v)
+
+    # Create ground plane mesh — vectorized
+    finite_mask = np.isfinite(height_map)
+    ii, jj = np.nonzero(finite_mask)
+    if ii.size > 0:
+        gx = min_x + ii.astype(np.float64) * grid_size
+        gz = min_z + jj.astype(np.float64) * grid_size
+        gy = height_map[ii, jj]
+        ground_points = np.column_stack([gx, gy, gz])
+    else:
+        ground_points = np.empty((0, 3))
     
     # Identify points near ground
     median_y = np.median(positions[:, 1]) if len(positions) > 0 else 0.0
@@ -135,19 +141,21 @@ def compute_occupancy_grid_2d(positions, ground_info, resolution=1.0, obstacle_h
     nz = int((max_z - min_z) / resolution) + 1
     
     occupancy_grid = np.zeros((nx, nz))
-    
-    # Mark occupied cells
+
+    # Mark occupied cells — vectorized
     ground_level = positions[:, 1].min()
-    for pos in positions:
-        # Skip low points (on ground)
-        if pos[1] < (ground_level + obstacle_height):
-            continue
-        
-        i = int((pos[0] - min_x) / resolution)
-        j = int((pos[2] - min_z) / resolution)
-        
-        if 0 <= i < nx and 0 <= j < nz:
-            occupancy_grid[i, j] = 1
-    
+
+    # Height filter: skip low points (on ground)
+    above = positions[:, 1] >= (ground_level + obstacle_height)
+    pos_above = positions[above]
+
+    if pos_above.size > 0:
+        i_all = np.trunc((pos_above[:, 0] - min_x) / resolution).astype(np.intp)
+        j_all = np.trunc((pos_above[:, 2] - min_z) / resolution).astype(np.intp)
+
+        # Bounds mask
+        valid = (i_all >= 0) & (i_all < nx) & (j_all >= 0) & (j_all < nz)
+        occupancy_grid[i_all[valid], j_all[valid]] = 1
+
     return occupancy_grid, (min_x, max_x, min_z, max_z, resolution)
 
